@@ -1,34 +1,36 @@
 import os
 import requests
-from dotenv import load_dotenv
-
+import traceback
 from langchain.tools import tool
 from langchain_groq import ChatGroq
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain_core.prompts import PromptTemplate
-from langchain import hub
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-@tool (return_direct=True)
-def nvd_tool (keyword: str, cve_id: str = None, pub_start_date: str = None, pub_end_date: str = None, severity: str = None) -> str:
-    """Search the National Vulnerability Database (NVD) for known vulnerabilities using a keyword or CVE ID. 
-    Inputs: 
-    keyword (string describing keyword)
-    cve_id (optional string for CVE if given)
-    pub_start_date (optional start date to filter by)
-    pub_end_date (optional end date to filter by)
-    severity (optional severity filter)
-
-    returns list of vulnerability search results as dictionaries
+# Simple direct approach - no agents, just manual tool calling
+@tool
+def nvd_tool(keyword, pub_start_date, pub_end_date, severity) -> str:
+    """Search the National Vulnerability Database (NVD) for known vulnerabilities.
+    
+    Args:
+        keyword: search term - can be CVE ID, software name, or vulnerability type
+        pub_start_date: Optional start date in YYYY-MM-DD format (pass null if not needed)
+        pub_end_date: Optional end date in YYYY-MM-DD format (pass null if not needed)
+        severity: Optional severity filter (LOW, MEDIUM, HIGH, CRITICAL) (pass null if not needed)
+    
+    Returns formatted vulnerability information.
     """
+    
     base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     headers = {}
     api_key = os.getenv("NVD_API_KEY")
     if api_key:
         headers["apiKey"] = api_key
 
-    params = {"keywordSearch": keyword, "resultsPerPage": 5}
-    if cve_id:
-        params["cveId"] = cve_id
+    if keyword.upper().startswith("CVE-"):
+        params = {"cveId": keyword, "resultsPerPage": 5}
+    else:
+        params = {"keywordSearch": keyword, "resultsPerPage": 5}
+    
     if pub_start_date:
         params["pubStartDate"] = pub_start_date + "T00:00:00.000"
     if pub_end_date:
@@ -40,23 +42,20 @@ def nvd_tool (keyword: str, cve_id: str = None, pub_start_date: str = None, pub_
         resp = requests.get(base_url, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-    except Exception as e:
-        return f"Error querying NVD: {e}"
-
-    vulns = data.get("vulnerabilities", [])
-    if not vulns:
-        print("none")
-        return "No vulnerabilities found."
-
-    results = []
-    for item in vulns:
-        cve = item.get("cve", {})
-        identifier = cve.get("id", "unknown")
-        published_date = cve.get("published", "unknown")
-        cna = cve.get("cna", {}).get("title", "unknown")
-        descriptions = cve.get("descriptions", [])
-        description = descriptions[0].get("value", "No description provided") if descriptions else "No description provided"
-
+        
+        vulns = data.get("vulnerabilities", [])
+        if not vulns:
+            return f"No vulnerabilities found for: {keyword}"
+        
+        results = []
+        for item in vulns:
+            cve = item.get("cve", {})
+            identifier = cve.get("id", "unknown")
+            published_date = cve.get("published", "unknown")
+            cna = cve.get("cna", {}).get("title", "unknown")
+            descriptions = cve.get("descriptions", [])
+            if descriptions:
+                description = descriptions[0].get("value", "No description")[:200]
         results.append({
             "Identifier": identifier,
             "Published_Date": published_date,
@@ -64,54 +63,57 @@ def nvd_tool (keyword: str, cve_id: str = None, pub_start_date: str = None, pub_
             "Description": description
         })
 
-    if not results:
-        return "Error: No valid vulnerability data could be extracted."
-    
-    return results
+        return results
+        
+    except Exception as e:
+        return f"Error: {e}"
 
 def main():
     
-    print("NVD Chatbot (type 'exit' to quit)")
+    print("NVD Security Assistant (Type exit or quit to terminate)")
     
-    # Initialize LLM and tools
-    llm = ChatGroq(model="deepseek-r1-distill-llama-70b", temperature=0, api_key=os.getenv("GROQ_API_KEY"))
+    llm = ChatGroq(
+        model="deepseek-r1-distill-llama-70b", 
+        temperature=0, 
+        api_key=os.getenv("GROQ_API_KEY")
+    )
+    
     tools = [nvd_tool]
-    prompt = PromptTemplate.from_template("""Answer the following questions as best you can. You have access to the following tools:
-
-{tools}
-
-Use the following format:
-
-Question: {input}
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: "input_type"="search_term", where input type is the most closely aligned input given
-Observation: the records outputted by nvd_tool
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: {agent_scratchpad} I now have the information
-Action: I will proceed to explain the specific vulnerability details
-Final Answer: natural language explanation of relevant result descriptions.                      
-""")
-
-    # Create the agent and executor
-    agent = create_react_agent(llm, tools, prompt)
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", 
+         "You are a cybersecurity assistant with access to the National Vulnerability Database (NVD). "
+         "When users ask about vulnerabilities, CVEs, or security issues, use the nvd_tool to get current information. "
+         "Always use the tool to get up-to-date vulnerability data rather than relying on your training data. "
+         "Provide clear, helpful explanations of the vulnerability details."
+        ),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad")
+    ])
+        
+    try:
+        agent = create_tool_calling_agent(llm, tools, prompt)
+    except Exception as e:
+        print(f"Agent calling failed: {e}")
+    
     agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
+        agent=agent, 
+        tools=tools, 
         verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=3
+        handle_parsing_errors=True
     )
     
     while True:
-        query = input("\n> ")
-        if query.strip().lower() in {"exit", "quit"}:
+        query = input("> ")
+        if query.strip().lower() in {"exit", "quit", "q"}:
             break
+            
         try:
-            response = agent_executor.invoke({"input": query})      
-            print(response["output"])
+            result = agent_executor.invoke({"input": query})
+            print(f"\n {result['output']}\n")
         except Exception as e:
             print(f"Error: {e}")
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
