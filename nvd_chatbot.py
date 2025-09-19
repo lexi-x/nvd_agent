@@ -19,18 +19,19 @@ def nvd_tool(keyword, pub_start_date, pub_end_date, severity) -> str:
     
     Returns formatted vulnerability information.
     """
-    
     base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     headers = {}
     api_key = os.getenv("NVD_API_KEY")
     if api_key:
         headers["apiKey"] = api_key
-
-    if keyword.upper().startswith("CVE-"):
-        params = {"cveId": keyword, "resultsPerPage": 5}
-    else:
-        params = {"keywordSearch": keyword, "resultsPerPage": 5}
     
+    # Define parameters
+    params = {}
+    if keyword:
+        if keyword.upper().startswith("CVE-"):
+            params["cveId"] = keyword
+        else:
+            params["keywordSearch"] = keyword 
     if pub_start_date:
         params["pubStartDate"] = pub_start_date + "T00:00:00.000"
     if pub_end_date:
@@ -38,6 +39,10 @@ def nvd_tool(keyword, pub_start_date, pub_end_date, severity) -> str:
     if severity:
         params["cvssV3Severity"] = severity.upper()
 
+    if not params:
+        return "Error: At least one argument is required."
+
+    # query the NVD API
     try:
         resp = requests.get(base_url, params=params, headers=headers, timeout=15)
         resp.raise_for_status()
@@ -72,6 +77,7 @@ def main():
     
     print("NVD Security Assistant (Type exit or quit to terminate)")
     
+    # initialize the LLM and agent, API keys should be set in env variables
     llm = ChatGroq(
         model="deepseek-r1-distill-llama-70b", 
         temperature=0, 
@@ -103,6 +109,7 @@ def main():
         handle_parsing_errors=True
     )
     
+    # agent interaction loop
     while True:
         query = input("> ")
         if query.strip().lower() in {"exit", "quit", "q"}:
